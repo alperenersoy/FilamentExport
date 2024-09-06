@@ -35,6 +35,9 @@ use Illuminate\Support\Facades\Date;
 use Spatie\SimpleExcel\SimpleExcelWriter;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
+use AlperenErsoy\FilamentExport\Actions\Concerns\CanExcludeColumns; // --- EXCLUDE COLUMNS
+
+
 class FilamentExport
 {
     use CanFilterColumns;
@@ -46,6 +49,7 @@ class FilamentExport
     use CanShowHiddenColumns;
     use CanDisableTableColumns;
     use CanUseSnappy;
+    use CanExcludeColumns; // --- EXCLUDE COLUMNS
     use HasCsvDelimiter;
     use HasData;
     use HasFileName;
@@ -80,7 +84,7 @@ class FilamentExport
         if ($this->isTableColumnsDisabled()) {
             $tableColumns = [];
         } else {
-            $tableColumns = $this->shouldShowHiddenColumns() ? $this->getTable()->getLivewire()->getCachedTableColumns() : $this->getTable()->getColumns();
+            $tableColumns = $this->shouldShowHiddenColumns() ? $this->getTable()->getColumns() : $this->getTable()->getVisibleColumns();
         }
 
         $columns = collect($tableColumns);
@@ -96,6 +100,9 @@ class FilamentExport
         if ($this->getAdditionalColumns()->isNotEmpty()) {
             $columns = $columns->merge($this->getAdditionalColumns());
         }
+
+        // --- EXCLUDE COLUMNS
+        $columns = $columns->filter(fn ($column) => !in_array($column->getName(), $this->getExcludedColumns()));
 
         return $columns;
     }
@@ -144,6 +151,7 @@ class FilamentExport
         }, "{$this->getFileName()}.{$this->getFormat()}");
     }
 
+
     public function getPdf(): \Barryvdh\DomPDF\PDF | \Barryvdh\Snappy\PdfWrapper
     {
         if ($this->shouldUseSnappy()) {
@@ -154,6 +162,7 @@ class FilamentExport
         return \Barryvdh\DomPDF\Facade\Pdf::loadView($this->getPdfView(), $this->getViewData())
             ->setPaper('A4', $this->getPageOrientation());
     }
+    
 
     public static function setUpFilamentExportAction(FilamentExportHeaderAction | FilamentExportBulkAction $action): void
     {
@@ -195,11 +204,11 @@ class FilamentExport
 
         $action->additionalColumnsAddButtonLabel(__('filament-export::export_action.additional_columns_field.add_button_label'));
 
-        $action->modalButton(__('filament-export::export_action.export_action_label'));
+        $action->modalSubmitActionLabel(__('filament-export::export_action.export_action_label'));
 
         $action->modalHeading(__('filament-export::export_action.modal_heading'));
 
-        $action->modalActions($action->getExportModalActions());
+        $action->modalFooterActions($action->getExportModalActions());
     }
 
     public static function getFormComponents(FilamentExportHeaderAction | FilamentExportBulkAction $action): array
@@ -209,8 +218,10 @@ class FilamentExport
         if ($action->isTableColumnsDisabled()) {
             $columns = [];
         } else {
-            $columns = $action->shouldShowHiddenColumns() ? $action->getLivewire()->getCachedTableColumns() : $action->getTable()->getColumns();
+            $columns = $action->shouldShowHiddenColumns() ? $action->getTable()->getColumns() : $action->getTable()->getVisibleColumns();
         }
+        $columns = $action->shouldShowHiddenColumns() ? $action->getTable()->getColumns() : $action->getTable()->getVisibleColumns();
+
         $columns = collect($columns);
 
         $extraColumns = collect($action->getWithColumns());
@@ -224,7 +235,9 @@ class FilamentExport
             ->toArray();
 
         $updateTableView = function ($component, $livewire) use ($action) {
-            $data = $action instanceof FilamentExportBulkAction ? $livewire->mountedTableBulkActionData : $livewire->mountedTableActionData;
+            /** @var \AlperenErsoy\FilamentExport\Components\TableView $component */
+            /** @var \Filament\Resources\Pages\ListRecords $livewire */
+            $data = $action instanceof FilamentExportBulkAction ? $livewire->getMountedTableBulkActionForm()->getState() : $livewire->getMountedTableActionForm()->getState();
 
             $export = FilamentExport::make()
                 ->filteredColumns($data['filter_columns'] ?? [])
@@ -238,16 +251,20 @@ class FilamentExport
                 ->csvDelimiter($action->getCsvDelimiter())
                 ->formatStates($action->getFormatStates());
 
+
+            if ($data['table_view'] == 'print-' . $action->getUniqueActionId()) {
+                $export->data($action->getRecords());
+                $printHTML = view('filament-export::print', $export->getViewData())->render();
+            } else {
+                $printHTML = '';
+            }
+
+            $livewire->resetPage('exportPage');
+
             $component
                 ->export($export)
-                ->refresh($action->shouldRefreshTableView());
-
-            if ($data['table_view'] == 'print-'.$action->getUniqueActionId()) {
-                $export->data($action->getRecords());
-                $action->getLivewire()->printHTML = view('filament-export::print', $export->getViewData())->render();
-            } elseif ($data['table_view'] == 'afterprint-'.$action->getUniqueActionId()) {
-                $action->getLivewire()->printHTML = null;
-            }
+                ->refresh($action->shouldRefreshTableView())
+                ->printHTML($printHTML);
         };
 
         $initialExport = FilamentExport::make()
@@ -287,7 +304,7 @@ class FilamentExport
                 ->label($action->getAdditionalColumnsFieldLabel())
                 ->keyLabel($action->getAdditionalColumnsTitleFieldLabel())
                 ->valueLabel($action->getAdditionalColumnsDefaultValueFieldLabel())
-                ->addButtonLabel($action->getAdditionalColumnsAddButtonLabel())
+                ->addActionLabel($action->getAdditionalColumnsAddButtonLabel())
                 ->hidden($action->isAdditionalColumnsDisabled()),
             TableView::make('table_view')
                 ->export($initialExport)
@@ -317,6 +334,7 @@ class FilamentExport
             ->modifyExcelWriter($action->getModifyExcelWriter())
             ->modifyPdfWriter($action->getModifyPdfWriter())
             ->formatStates($action->getFormatStates())
+            ->excludeColumns($action->getExcludedColumns()) // --- EXCLUDE COLUMNS
             ->download();
     }
 
@@ -387,12 +405,12 @@ class FilamentExport
             return $closure(...$dependencies);
         }
 
-         $state = in_array(\Filament\Tables\Columns\Concerns\CanFormatState::class, class_uses($column)) ? $column->getFormattedState() : $column->getState();
+        $state = in_array(\Filament\Tables\Columns\Concerns\CanFormatState::class, class_uses($column)) ? $column->formatState($column->getState()) : $column->getState();
 
         if (is_array($state)) {
             $state = implode(', ', $state);
         } elseif ($column instanceof ImageColumn) {
-            $state = $column->getImagePath();
+            $state = $column->getImageUrl();
         } elseif ($column instanceof ViewColumn) {
             $state = trim(preg_replace('/\s+/', ' ', strip_tags($column->render()->render())));
         }

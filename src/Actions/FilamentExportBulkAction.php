@@ -17,6 +17,7 @@ use AlperenErsoy\FilamentExport\Actions\Concerns\CanModifyWriters;
 use AlperenErsoy\FilamentExport\Actions\Concerns\CanRefreshTable;
 use AlperenErsoy\FilamentExport\Actions\Concerns\CanShowHiddenColumns;
 use AlperenErsoy\FilamentExport\Actions\Concerns\CanUseSnappy;
+use AlperenErsoy\FilamentExport\Actions\Concerns\CanExcludeColumns;
 use AlperenErsoy\FilamentExport\Actions\Concerns\HasAdditionalColumnsField;
 use AlperenErsoy\FilamentExport\Actions\Concerns\HasDefaultFormat;
 use AlperenErsoy\FilamentExport\Actions\Concerns\HasDefaultPageOrientation;
@@ -51,6 +52,7 @@ class FilamentExportBulkAction extends \Filament\Tables\Actions\BulkAction
     use CanRefreshTable;
     use CanShowHiddenColumns;
     use CanUseSnappy;
+    use CanExcludeColumns;
     use HasAdditionalColumnsField;
     use HasCsvDelimiter;
     use HasDefaultFormat;
@@ -87,7 +89,19 @@ class FilamentExportBulkAction extends \Filament\Tables\Actions\BulkAction
 
                 $action->paginator($paginator);
 
-                return FilamentExport::getFormComponents($action);
+                $formComponents = FilamentExport::getFormComponents($action);
+
+                // --- EXCLUDE COLUMNS
+                // Remove excluded columns from the filter_columns checkbox list
+                if (isset($formComponents['filter_columns'])) {
+                    $formComponents['filter_columns']->options(
+                        collect($formComponents['filter_columns']->getOptions())
+                            ->except($this->getExcludedColumns())
+                            ->toArray()
+                    );
+                }
+                return $formComponents;
+
             })
             ->action(static function ($action, $records, $data): StreamedResponse {
                 $action->fillDefaultData($data);
